@@ -16,4 +16,4 @@ def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     async def instant(_: float) -> None:
         return None
 
-    monkeypatch.setattr("weighcast.http.asyncio.sleep", instant)
+    monkeypatch.setattr("weighcast.http.sleep", instant)

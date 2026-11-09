@@ -76,8 +76,8 @@ async def plan_trip(
 
     series: dict = {}
     if not demo_weather:
-        # Plan scoring only needs weather along ETAs — not the full 48h heatmap window.
-        start, end = _trip_weather_window(trip.departure, max_duration_s)
+        # Same 0–48h window as the heatmap so checkpoint cells are warm for /api/heatmap.
+        start, end = _heatmap_weather_window(trip.departure, max_duration_s)
         keys = list(
             dict.fromkeys(
                 grid_key(lat, lon)

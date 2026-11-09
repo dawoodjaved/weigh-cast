@@ -1,7 +1,9 @@
+import logging
 from pathlib import Path
 from typing import Any
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BASE_DIR.parent
@@ -13,6 +15,7 @@ env = environ.Env(
     CSRF_TRUSTED_ORIGINS=(list, []),
     REDIS_URL=(str, ""),
     OPEN_METEO_BASE_URL=(str, "https://api.open-meteo.com/v1/forecast"),
+    OPEN_METEO_API_KEY=(str, ""),
     VALHALLA_URL=(str, "https://valhalla1.openstreetmap.de/route"),
     LOG_LEVEL=(str, "INFO"),
     HEATMAP_MAX_CELLS=(int, 600),
@@ -67,22 +70,41 @@ DATABASES = {
 }
 
 REDIS_URL: str = env("REDIS_URL")
+# Production is Redis-first: shared weather/plan cache across workers. LocMem is
+# local-dev / tests only — without Redis, Open-Meteo 429s come back on every cold start.
+if not DEBUG and not REDIS_URL:
+    raise ImproperlyConfigured(
+        "REDIS_URL is required when DJANGO_DEBUG=false (Redis-first Open-Meteo cache)."
+    )
+
+CACHE_BACKEND = (
+    "django.core.cache.backends.redis.RedisCache"
+    if REDIS_URL
+    else "django.core.cache.backends.locmem.LocMemCache"
+)
 CACHES: dict[str, dict[str, Any]] = {
     "default": (
         {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "BACKEND": CACHE_BACKEND,
             "LOCATION": REDIS_URL,
-            "TIMEOUT": 30 * 60,
+            "TIMEOUT": 6 * 60 * 60,
+            "KEY_PREFIX": "weighcast",
         }
         if REDIS_URL
         else {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "BACKEND": CACHE_BACKEND,
             "LOCATION": "weighcast",
-            "TIMEOUT": 30 * 60,
+            "TIMEOUT": 6 * 60 * 60,
             "OPTIONS": {"MAX_ENTRIES": 20_000},
         }
     )
 }
+if REDIS_URL:
+    logging.getLogger(__name__).info("Cache backend: Redis (%s)", REDIS_URL.split("@")[-1])
+else:
+    logging.getLogger(__name__).warning(
+        "Cache backend: LocMem — set REDIS_URL for shared Open-Meteo caching"
+    )
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
@@ -116,6 +138,7 @@ SPECTACULAR_SETTINGS = {
 }
 
 OPEN_METEO_BASE_URL: str = env("OPEN_METEO_BASE_URL")
+OPEN_METEO_API_KEY: str = env("OPEN_METEO_API_KEY")
 VALHALLA_URL: str = env("VALHALLA_URL")
 HEATMAP_MAX_CELLS: int = env("HEATMAP_MAX_CELLS")
 

@@ -1,3 +1,5 @@
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -5,9 +7,11 @@ import httpx
 import numpy as np
 import pytest
 import respx
+from django.core.cache import cache
 
 from weighcast.http import UpstreamError
 from weighcast.weather.openmeteo import (
+    FRESH_TTL_S,
     GEOCODE_URL,
     NOMINATIM_REVERSE_URL,
     HourlySeries,
@@ -49,7 +53,34 @@ async def test_requests_hourly_imperial_window(client: OpenMeteoClient) -> None:
     assert params["precipitation_unit"] == "inch"
     assert params["timeformat"] == "unixtime"
     assert params["start_hour"] == "2026-11-03T10:00"
+    # Caller end (+1h) is past the default +48h floor, so the longer window wins.
     assert params["end_hour"] == "2026-11-05T11:00"
+    assert "apikey" not in params
+
+
+@respx.mock
+async def test_hourly_uses_canonical_48h_window_for_short_trips(
+    client: OpenMeteoClient,
+) -> None:
+    call = respx.get(URL).mock(side_effect=open_meteo_responder())
+    short_end = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
+
+    await client.hourly([(41.88, -87.63)], START, short_end)
+
+    params = call.calls.last.request.url.params
+    assert params["start_hour"] == "2026-11-03T10:00"
+    assert params["end_hour"] == "2026-11-05T10:00"
+
+
+@respx.mock
+async def test_attaches_api_key_when_configured() -> None:
+    call = respx.get(URL).mock(side_effect=open_meteo_responder())
+
+    async with httpx.AsyncClient() as http:
+        client = OpenMeteoClient(http, URL, api_key="secret-key")
+        await client.hourly([(41.88, -87.63)], START, END)
+
+    assert call.calls.last.request.url.params["apikey"] == "secret-key"
 
 
 @respx.mock
@@ -84,6 +115,59 @@ async def test_serves_repeat_requests_from_cache(client: OpenMeteoClient) -> Non
 
     assert call.call_count == 2
     assert call.calls.last.request.url.params["latitude"] == "42.00"
+
+
+@respx.mock
+async def test_serves_stale_redis_row_when_open_meteo_429s(
+    client: OpenMeteoClient,
+) -> None:
+    key = (40.0, -90.0)
+    respx.get(URL).mock(side_effect=open_meteo_responder())
+    await client.hourly([key], START, END)
+    await _age_entries([key], START)
+
+    respx.get(URL).respond(429, json={"reason": "Rate limited"})
+
+    series = await client.hourly([key], START, END)
+
+    assert series[key].wind_mph.size > 0
+    await _drain_background()
+
+
+@respx.mock
+async def test_stale_hit_returns_before_network_refresh(
+    client: OpenMeteoClient,
+) -> None:
+    key = (41.0, -90.0)
+    call = respx.get(URL).mock(side_effect=open_meteo_responder())
+    await client.hourly([key], START, END)
+    await _age_entries([key], START)
+    before = call.call_count
+
+    series = await client.hourly([key], START, END)
+    assert series[key].wind_mph.size > 0
+    # Redis-first: stale rows are returned without waiting on Open-Meteo.
+    assert call.call_count == before
+    await _drain_background()
+    assert call.call_count > before
+
+
+async def _age_entries(keys: list[tuple[float, float]], start: datetime) -> None:
+    from weighcast.weather import openmeteo as om
+
+    start_hour = om._floor_hour(start)
+    cache_keys = [om._cache_key(key, start_hour) for key in keys]
+    entries = await cache.aget_many(cache_keys)
+    assert entries, f"expected cached weather for {cache_keys}"
+    for ck, entry in entries.items():
+        aged = {**entry, "t": time.time() - FRESH_TTL_S - 10}
+        await cache.aset(ck, aged, 6 * 60 * 60)
+
+
+async def _drain_background() -> None:
+    pending = [task for task in asyncio.all_tasks() if task.get_name() == "openmeteo-refresh"]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @respx.mock

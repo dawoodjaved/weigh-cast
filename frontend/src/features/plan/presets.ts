@@ -9,47 +9,30 @@ export interface TripPreset {
   load: string
 }
 
-/** Short corridors so Valhalla + weather return in ~1s for demos. */
 export const TRIP_PRESETS: readonly TripPreset[] = [
   {
-    id: 'chi-mke',
-    label: 'Chicago → Milwaukee',
-    detail: '~90 mi · quick sample',
-    origin: { name: 'Chicago, Illinois, US', lat: 41.8781, lon: -87.6298 },
-    destination: { name: 'Milwaukee, Wisconsin, US', lat: 43.0389, lon: -87.9065 },
-    load: '36000',
+    id: 'dal-atl',
+    label: 'Dallas → Atlanta',
+    detail: 'About 800 mi on truck routing',
+    origin: { name: 'Dallas, Texas, US', lat: 32.7767, lon: -96.797 },
+    destination: { name: 'Atlanta, Georgia, US', lat: 33.749, lon: -84.388 },
+    load: '42000',
   },
   {
-    id: 'dal-ftw',
-    label: 'Dallas → Fort Worth',
-    detail: '~35 mi · metro hop',
-    origin: { name: 'Dallas, Texas, US', lat: 32.7767, lon: -96.797 },
-    destination: { name: 'Fort Worth, Texas, US', lat: 32.7555, lon: -97.3308 },
+    id: 'chi-den',
+    label: 'Chicago → Denver',
+    detail: 'About 1,000 mi across the Plains',
+    origin: { name: 'Chicago, Illinois, US', lat: 41.8781, lon: -87.6298 },
+    destination: { name: 'Denver, Colorado, US', lat: 39.7392, lon: -104.9903 },
     load: '40000',
   },
   {
-    id: 'den-cos',
-    label: 'Denver → Colorado Springs',
-    detail: '~70 mi · Front Range',
-    origin: { name: 'Denver, Colorado, US', lat: 39.7392, lon: -104.9903 },
-    destination: { name: 'Colorado Springs, Colorado, US', lat: 38.8339, lon: -104.8214 },
-    load: '38000',
-  },
-  {
-    id: 'bos-pvd',
-    label: 'Boston → Providence',
-    detail: '~50 mi · New England',
-    origin: { name: 'Boston, Massachusetts, US', lat: 42.3601, lon: -71.0589 },
-    destination: { name: 'Providence, Rhode Island, US', lat: 41.824, lon: -71.4128 },
-    load: '32000',
-  },
-  {
-    id: 'sea-tac',
-    label: 'Seattle → Tacoma',
-    detail: '~35 mi · Puget Sound',
-    origin: { name: 'Seattle, Washington, US', lat: 47.6062, lon: -122.3321 },
-    destination: { name: 'Tacoma, Washington, US', lat: 47.2529, lon: -122.4443 },
-    load: '36000',
+    id: 'chi-dal',
+    label: 'Chicago → Dallas',
+    detail: 'Example corridor · about 970 mi',
+    origin: { name: 'Chicago, Illinois, US', lat: 41.8781, lon: -87.6298 },
+    destination: { name: 'Dallas, Texas, US', lat: 32.7767, lon: -96.797 },
+    load: '42000',
   },
 ] as const
 

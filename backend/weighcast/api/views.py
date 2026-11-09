@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 async def _clients() -> tuple[ValhallaClient, OpenMeteoClient]:
     http = await shared_client()
     return ValhallaClient(http, settings.VALHALLA_URL), OpenMeteoClient(
-        http, settings.OPEN_METEO_BASE_URL
+        http, settings.OPEN_METEO_BASE_URL, settings.OPEN_METEO_API_KEY
     )
 
 
@@ -51,7 +51,23 @@ class BadGateway(APIException):
 
 @require_GET
 async def health(request: HttpRequest) -> JsonResponse:
-    return JsonResponse({"status": "ok"})
+    from django.core.cache import cache
+
+    cache_backend = "redis" if settings.REDIS_URL else "locmem"
+    cache_ok = True
+    try:
+        await cache.aset("health:ping", "1", 10)
+        cache_ok = (await cache.aget("health:ping")) == "1"
+    except Exception:
+        cache_ok = False
+        logger.exception("Cache health check failed")
+
+    status_name = "ok" if cache_ok else "degraded"
+    code = status.HTTP_200_OK if cache_ok else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JsonResponse(
+        {"status": status_name, "cache": cache_backend, "cache_ok": cache_ok},
+        status=code,
+    )
 
 
 class PlanView(APIView):

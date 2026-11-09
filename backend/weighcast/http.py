@@ -6,8 +6,12 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+# Alias so tests can patch backoff without replacing global asyncio.sleep.
+sleep = asyncio.sleep
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Cap wait so a rate-limited upstream fails fast instead of stalling Score the runs.
+MAX_RETRY_WAIT_S = 1.0
 DEFAULT_TIMEOUT = httpx.Timeout(8.0, connect=3.0)
 
 _shared: httpx.AsyncClient | None = None
@@ -39,17 +43,33 @@ async def shared_client() -> httpx.AsyncClient:
         return _shared
 
 
+def retry_delay_s(
+    response: httpx.Response | None, attempt: int, backoff_s: float
+) -> float:
+    """Short backoff only — never hold the user for long Retry-After values."""
+    delay = backoff_s * 2**attempt
+    if response is not None and response.status_code in {429, 503}:
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                delay = min(delay, float(header))
+            except ValueError:
+                pass
+    return min(delay, MAX_RETRY_WAIT_S)
+
+
 async def get_with_retry(
     client: httpx.AsyncClient,
     url: str,
     params: Mapping[str, Any],
     *,
     service: str,
-    attempts: int = 3,
-    backoff_s: float = 0.25,
+    attempts: int = 2,
+    backoff_s: float = 0.2,
 ) -> httpx.Response:
     for attempt in range(attempts):
         last_try = attempt == attempts - 1
+        response: httpx.Response | None = None
         try:
             response = await client.get(url, params=params)
         except httpx.TransportError as exc:
@@ -62,5 +82,5 @@ async def get_with_retry(
             if last_try:
                 raise UpstreamError(service, f"responded with {response.status_code}")
             logger.warning("%s responded with %s, retrying", service, response.status_code)
-        await asyncio.sleep(backoff_s * 2**attempt)
+        await sleep(retry_delay_s(response, attempt, backoff_s))
     raise AssertionError("unreachable")

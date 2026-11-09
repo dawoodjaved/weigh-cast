@@ -120,29 +120,31 @@ npm run build
 | `DJANGO_ALLOWED_HOSTS` | Comma-separated list of hosts                |
 | `CORS_ALLOWED_ORIGINS` | Origins allowed to call the API              |
 | `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF                     |
-| `REDIS_URL`            | Redis cache; uses in-memory cache when empty |
+| `REDIS_URL`            | **Required in production.** Shared Redis cache for Open-Meteo + plans (LocMem when empty in debug) |
 | `VALHALLA_URL`         | Valhalla route endpoint                      |
 | `OPEN_METEO_BASE_URL`  | Open-Meteo forecast endpoint                 |
+| `OPEN_METEO_API_KEY`   | Optional commercial Open-Meteo key           |
 | `HEATMAP_MAX_CELLS`    | Max cells in the corridor heatmap grid       |
 | `LOG_LEVEL`            | Log level, defaults to `INFO`                |
 | `WEB_CONCURRENCY`      | Gunicorn workers in the Docker image         |
 | `VITE_API_URL`         | Backend origin for production builds         |
 
-No third-party API keys are required.
+Weather is Redis-first: fresh hits skip Open-Meteo, stale hits return immediately (refresh in background), and 429s fall back to stale rows when available. No third-party API keys are required for the free Open-Meteo tier.
 
 ## Production
 
 ### Render (API)
 
-`render.yaml` builds `backend/Dockerfile` and a Key Value cache.
+`render.yaml` builds `backend/Dockerfile` and a Key Value cache (`weighcast-cache` → `REDIS_URL`).
 
-1. Create the Blueprint from this repo.
-2. Set `DJANGO_ALLOWED_HOSTS` to the Render hostname, for example `weighcast-api.onrender.com`
+1. Create the Blueprint from this repo (API + Redis Key Value must both exist).
+2. Confirm `REDIS_URL` is linked from `weighcast-cache` — production refuses to boot without it.
+3. Set `DJANGO_ALLOWED_HOSTS` to the Render hostname, for example `weighcast-api.onrender.com`
    (no `https://`).
-3. Set `CORS_ALLOWED_ORIGINS` and `CSRF_TRUSTED_ORIGINS` to the Vercel origin:
+4. Set `CORS_ALLOWED_ORIGINS` and `CSRF_TRUSTED_ORIGINS` to the Vercel origin:
    `https://weighcast.vercel.app`.
-4. `DJANGO_SECRET_KEY` is generated. Leave `DJANGO_DEBUG=false`.
-5. Health check: `GET /api/health`.
+5. `DJANGO_SECRET_KEY` is generated. Leave `DJANGO_DEBUG=false`.
+6. Health check: `GET /api/health` → `{"status":"ok","cache":"redis","cache_ok":true}`.
 
 The image runs `gunicorn` with `UvicornWorker`, two workers, 60s timeout, bound to `$PORT`.
 
