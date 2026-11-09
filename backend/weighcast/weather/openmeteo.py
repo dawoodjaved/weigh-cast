@@ -14,14 +14,16 @@ from django.core.cache import cache
 from weighcast.core.geometry import FloatArray
 from weighcast.core.risk import Weather
 from weighcast.http import UpstreamError, get_with_retry
+from weighcast.weather import nws
 
 logger = logging.getLogger(__name__)
 
 HOURLY_VARIABLES = ("wind_speed_10m", "wind_gusts_10m", "rain", "showers", "snowfall")
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
-CHUNK_SIZE = 50
-MAX_CONCURRENT_REQUESTS = 4
+CHUNK_SIZE = 40
+# One in-flight Open-Meteo call — Render’s shared egress IP trips free-tier 429s easily.
+MAX_CONCURRENT_REQUESTS = 1
 # Always pull leave-later horizon so plan + heatmap share one cache entry per cell.
 FORECAST_HOURS = 48
 # Redis-first TTLs: serve fresh for 45m, keep rows 6h for stale hits / 429 fallback.
@@ -30,7 +32,10 @@ CACHE_TTL_S = 6 * 60 * 60
 GEOCODE_CACHE_TTL_S = 24 * 60 * 60
 GEOCODE_FETCH = 20
 GEOCODE_COUNTRIES = frozenset({"US", "CA", "MX"})
-GRID_DECIMALS = 2
+# ~11 km cells → far fewer unique Open-Meteo/NWS lookups on a corridor.
+GRID_DECIMALS = 1
+CIRCUIT_KEY = "om:circuit:429"
+CIRCUIT_TTL_S = 10 * 60
 GridKey = tuple[float, float]
 WeatherRow = dict[str, list[float]]
 CacheEntry = dict[str, Any]
@@ -123,23 +128,29 @@ class OpenMeteoClient:
             )
             return result
 
+        circuit_open = bool(await cache.aget(CIRCUIT_KEY))
+        if circuit_open:
+            logger.warning("Open-Meteo circuit open; using NWS/stale for %s cells", len(missing))
+            await self._recover_without_open_meteo(
+                missing, start_hour, cache_keys, result, stale
+            )
+            return result
+
         try:
             await self._fill_missing(missing, start_hour, end_hour, cache_keys, result)
-        except UpstreamError:
-            recovered = 0
-            for key in missing:
-                if key in result:
-                    continue
-                row = stale.get(key)
-                if row is None:
-                    continue
-                result[key] = _to_series(row)
-                recovered += 1
-            still_missing = [key for key in missing if key not in result]
-            if still_missing:
-                raise
-            logger.warning(
-                "Open-Meteo unavailable; served stale Redis weather for %s cells", recovered
+        except UpstreamError as exc:
+            if "429" not in str(exc):
+                recovered = _apply_stale(missing, result, stale)
+                if any(key not in result for key in missing):
+                    raise
+                logger.warning(
+                    "Open-Meteo unavailable; served stale Redis weather for %s cells",
+                    recovered,
+                )
+                return result
+            await cache.aset(CIRCUIT_KEY, "1", CIRCUIT_TTL_S)
+            await self._recover_without_open_meteo(
+                missing, start_hour, cache_keys, result, stale
             )
         return result
 
@@ -219,10 +230,65 @@ class OpenMeteoClient:
         cache_keys: dict[GridKey, str],
     ) -> None:
         try:
-            sink: dict[GridKey, HourlySeries] = {}
+            if await cache.aget(CIRCUIT_KEY):
+                sink: dict[GridKey, HourlySeries] = {}
+                await self._fill_from_nws(list(keys), start_hour, cache_keys, sink)
+                return
+            sink = {}
             await self._fill_missing(list(keys), start_hour, end_hour, cache_keys, sink)
         except Exception:
-            logger.warning("Background Open-Meteo refresh failed", exc_info=True)
+            logger.warning("Background weather refresh failed", exc_info=True)
+
+    async def _recover_without_open_meteo(
+        self,
+        missing: list[GridKey],
+        start_hour: datetime,
+        cache_keys: dict[GridKey, str],
+        result: dict[GridKey, HourlySeries],
+        stale: dict[GridKey, WeatherRow],
+    ) -> None:
+        recovered = _apply_stale(missing, result, stale)
+        still = [key for key in missing if key not in result]
+        if still:
+            await self._fill_from_nws(still, start_hour, cache_keys, result)
+        leftover = [key for key in missing if key not in result]
+        if leftover:
+            raise UpstreamError(
+                "Open-Meteo",
+                "responded with 429 (NWS fallback also unavailable for some cells)",
+            )
+        if recovered:
+            logger.warning(
+                "Open-Meteo rate-limited; served stale Redis weather for %s cells", recovered
+            )
+
+    async def _fill_from_nws(
+        self,
+        keys: list[GridKey],
+        start_hour: datetime,
+        cache_keys: dict[GridKey, str],
+        result: dict[GridKey, HourlySeries],
+    ) -> None:
+        to_cache: dict[str, CacheEntry] = {}
+        now = time.time()
+        for key in keys:
+            if key in result:
+                continue
+            lat, lon = key
+            if not nws.in_conus(lat, lon):
+                continue
+            try:
+                row = await nws.hourly_row(
+                    self._http, lat, lon, start_hour, FORECAST_HOURS
+                )
+            except UpstreamError:
+                logger.warning("NWS fallback failed for %s,%s", lat, lon, exc_info=True)
+                continue
+            result[key] = _to_series(row)
+            to_cache[cache_keys[key]] = {"t": now, "row": row, "src": "nws"}
+        if to_cache:
+            await cache.aset_many(to_cache, CACHE_TTL_S)
+            logger.info("NWS fallback filled %s weather cells", len(to_cache))
 
     async def _fill_missing(
         self,
@@ -245,12 +311,11 @@ class OpenMeteoClient:
             return
 
         chunks = [pending[i : i + CHUNK_SIZE] for i in range(0, len(pending), CHUNK_SIZE)]
-        fetched = await asyncio.gather(
-            *(self._fetch(chunk, start_hour, end_hour) for chunk in chunks)
-        )
+        # Sequential chunks (semaphore=1) to avoid bursting the free Open-Meteo tier.
         to_cache: dict[str, CacheEntry] = {}
         now = time.time()
-        for chunk, rows in zip(chunks, fetched, strict=True):
+        for chunk in chunks:
+            rows = await self._fetch(chunk, start_hour, end_hour)
             for key, row in zip(chunk, rows, strict=True):
                 result[key] = _to_series(row)
                 to_cache[cache_keys[key]] = {"t": now, "row": row}
@@ -260,10 +325,11 @@ class OpenMeteoClient:
     async def _fetch(
         self, keys: Sequence[GridKey], start_hour: datetime, end_hour: datetime
     ) -> list[WeatherRow]:
+        fmt = f"{{:.{GRID_DECIMALS}f}}"
         params = self._with_key(
             {
-                "latitude": ",".join(f"{lat:.2f}" for lat, _ in keys),
-                "longitude": ",".join(f"{lon:.2f}" for _, lon in keys),
+                "latitude": ",".join(fmt.format(lat) for lat, _ in keys),
+                "longitude": ",".join(fmt.format(lon) for _, lon in keys),
                 "hourly": ",".join(HOURLY_VARIABLES),
                 "wind_speed_unit": "mph",
                 "precipitation_unit": "inch",
@@ -319,7 +385,25 @@ def _to_series(row: WeatherRow) -> HourlySeries:
 
 
 def _cache_key(key: GridKey, start_hour: datetime) -> str:
-    return f"om:{key[0]:.2f},{key[1]:.2f}:{start_hour:%Y%m%d%H}:h{FORECAST_HOURS}"
+    fmt = f"{{:.{GRID_DECIMALS}f}}"
+    return f"om:{fmt.format(key[0])},{fmt.format(key[1])}:{start_hour:%Y%m%d%H}:h{FORECAST_HOURS}"
+
+
+def _apply_stale(
+    missing: list[GridKey],
+    result: dict[GridKey, HourlySeries],
+    stale: dict[GridKey, WeatherRow],
+) -> int:
+    recovered = 0
+    for key in missing:
+        if key in result:
+            continue
+        row = stale.get(key)
+        if row is None:
+            continue
+        result[key] = _to_series(row)
+        recovered += 1
+    return recovered
 
 
 def _row_from_entry(entry: Any) -> WeatherRow | None:

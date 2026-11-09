@@ -129,7 +129,7 @@ npm run build
 | `WEB_CONCURRENCY`      | Gunicorn workers in the Docker image         |
 | `VITE_API_URL`         | Backend origin for production builds         |
 
-Weather is Redis-first: fresh hits skip Open-Meteo, stale hits return immediately (refresh in background), and 429s fall back to stale rows when available. No third-party API keys are required for the free Open-Meteo tier.
+Weather is Redis-first: fresh hits skip Open-Meteo, stale hits return immediately (refresh in background). On Open-Meteo **429**, the API opens a short circuit and falls back to **NWS (weather.gov)** for US corridors (and stale Redis when present). No third-party API keys are required.
 
 ## Production
 

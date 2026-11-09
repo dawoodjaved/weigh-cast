@@ -27,7 +27,11 @@ class UpstreamError(Exception):
 def new_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=DEFAULT_TIMEOUT,
-        headers={"User-Agent": "weighcast/1.0"},
+        # NWS requires an identifying User-Agent; Open-Meteo accepts the same.
+        headers={
+            "User-Agent": "weighcast/1.0 (https://weighcast.vercel.app; weighcast-support@example.com)",
+            "Accept": "application/geo+json, application/json",
+        },
         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 

@@ -18,7 +18,7 @@ env = environ.Env(
     OPEN_METEO_API_KEY=(str, ""),
     VALHALLA_URL=(str, "https://valhalla1.openstreetmap.de/route"),
     LOG_LEVEL=(str, "INFO"),
-    HEATMAP_MAX_CELLS=(int, 600),
+    HEATMAP_MAX_CELLS=(int, 250),
 )
 
 for env_file in (REPO_ROOT / ".env", BASE_DIR / ".env"):

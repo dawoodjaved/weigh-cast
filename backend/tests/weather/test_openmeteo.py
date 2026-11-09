@@ -36,9 +36,9 @@ def windy_by_latitude(lat: float, _: float) -> dict[str, float]:
     return {"wind": lat, "gust": lat + 5, "rain": 0.1, "showers": 0.05, "snow": 0.0}
 
 
-def test_grid_key_rounds_to_hundredths() -> None:
-    assert grid_key(41.87814, -87.62979) == (41.88, -87.63)
-    assert grid_key(41.8741, -87.6261) == grid_key(41.8749, -87.6251)
+def test_grid_key_rounds_to_tenths() -> None:
+    assert grid_key(41.87814, -87.62979) == (41.9, -87.6)
+    assert grid_key(41.84, -87.61) == grid_key(41.849, -87.649)
 
 
 @respx.mock
@@ -92,7 +92,7 @@ async def test_deduplicates_and_chunks_locations(client: OpenMeteoClient) -> Non
 
     assert call.call_count == 3
     sizes = sorted(len(c.request.url.params["latitude"].split(",")) for c in call.calls)
-    assert sizes == [20, 50, 50]
+    assert sizes == [40, 40, 40]
     assert len(series) == 120
     assert series[(30.5, -90.0)].wind_mph[0] == pytest.approx(30.5)
 
@@ -114,7 +114,7 @@ async def test_serves_repeat_requests_from_cache(client: OpenMeteoClient) -> Non
     await client.hourly([(40.0, -90.0), (42.0, -90.0)], START, END)
 
     assert call.call_count == 2
-    assert call.calls.last.request.url.params["latitude"] == "42.00"
+    assert call.calls.last.request.url.params["latitude"] == "42.0"
 
 
 @respx.mock
@@ -132,6 +132,40 @@ async def test_serves_stale_redis_row_when_open_meteo_429s(
 
     assert series[key].wind_mph.size > 0
     await _drain_background()
+
+
+@respx.mock
+async def test_falls_back_to_nws_on_open_meteo_429(client: OpenMeteoClient) -> None:
+    key = (41.9, -87.6)
+    respx.get(URL).respond(429, json={"reason": "Rate limited"})
+    respx.get("https://api.weather.gov/points/41.9000,-87.6000").respond(
+        json={
+            "properties": {
+                "forecastHourly": "https://api.weather.gov/gridpoints/LOT/9,9/forecast/hourly"
+            }
+        }
+    )
+    start_ts = int(START.replace(minute=0, second=0, microsecond=0).timestamp())
+    periods = [
+        {
+            "startTime": datetime.fromtimestamp(start_ts + hour * 3600, UTC).strftime(
+                "%Y-%m-%dT%H:%M:%S+00:00"
+            ),
+            "windSpeed": "18 mph",
+            "windGust": "25 mph",
+            "shortForecast": "Windy",
+            "probabilityOfPrecipitation": {"value": 5},
+        }
+        for hour in range(50)
+    ]
+    respx.get("https://api.weather.gov/gridpoints/LOT/9,9/forecast/hourly").respond(
+        json={"properties": {"periods": periods}}
+    )
+
+    series = await client.hourly([key], START, END)
+
+    assert series[key].wind_mph[0] == pytest.approx(18.0)
+    assert await cache.aget("om:circuit:429") == "1"
 
 
 @respx.mock

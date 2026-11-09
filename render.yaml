@@ -27,7 +27,7 @@ services:
       - key: OPEN_METEO_BASE_URL
         value: https://api.open-meteo.com/v1/forecast
       - key: HEATMAP_MAX_CELLS
-        value: "600"
+        value: "250"
       - key: LOG_LEVEL
         value: INFO
       - key: WEB_CONCURRENCY
